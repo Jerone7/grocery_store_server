@@ -3,6 +3,9 @@ const express = require("express");
 const cors = require("cors");
 const http = require("http");
 const https = require("https");
+const fs = require("fs");
+const path = require("path");
+const adminAuthMiddleware = require("./middleware/adminAuthMiddleware");
 
 const app = express();
 app.use(cors());
@@ -22,6 +25,11 @@ app.use("/api/banners", require("./routes/bannerRoutes"));
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/orders", require("./routes/orderRoutes"));
 app.use("/api/payment", require("./routes/paymentRoutes"));
+app.use("/admin-api/auth", require("./routes/adminAuthRoutes"));
+app.use("/admin-api/products", adminAuthMiddleware, require("./routes/adminProductRoutes"));
+app.use("/admin-api/orders", adminAuthMiddleware, require("./routes/adminOrderRoutes"));
+app.use("/admin-api/categories", adminAuthMiddleware, require("./routes/adminCategoryRoutes"));
+app.use("/admin-api/banners", adminAuthMiddleware, require("./routes/adminBannerRoutes"));
 
 const PORT = Number(process.env.PORT) || 5000;
 const ENABLE_SELF_PING = process.env.ENABLE_SELF_PING === "true";
@@ -32,6 +40,8 @@ const SELF_PING_INTERVAL_MS =
   Number.isFinite(parsedInterval) && parsedInterval >= 60_000
     ? parsedInterval
     : DEFAULT_INTERVAL_MS;
+const groceryClientDist = path.resolve(__dirname, "../client/dist");
+const adminClientDist = path.resolve(__dirname, "../../react_admin/client/dist");
 
 const pingUrl = (url) =>
   new Promise((resolve, reject) => {
@@ -48,8 +58,35 @@ const pingUrl = (url) =>
     });
   });
 
+if (fs.existsSync(adminClientDist)) {
+  app.use("/admin", express.static(adminClientDist));
+}
+
+if (fs.existsSync(groceryClientDist)) {
+  app.use(express.static(groceryClientDist));
+}
+
+app.get(/^\/admin(?:\/.*)?$/, (_req, res, next) => {
+  if (!fs.existsSync(path.join(adminClientDist, "index.html"))) {
+    return next();
+  }
+
+  return res.sendFile(path.join(adminClientDist, "index.html"));
+});
+
+app.get(/^(?!\/api(?:\/|$)|\/admin-api(?:\/|$)|\/health$).*/, (_req, res, next) => {
+  if (!fs.existsSync(path.join(groceryClientDist, "index.html"))) {
+    return next();
+  }
+
+  return res.sendFile(path.join(groceryClientDist, "index.html"));
+});
+
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
+  console.log(`Store frontend: http://localhost:${PORT}/`);
+  console.log(`Admin frontend: http://localhost:${PORT}/admin`);
+  console.log(`Admin API: http://localhost:${PORT}/admin-api`);
   console.log(`RAZORPAY_KEY_ID=${process.env.RAZORPAY_KEY_ID || "(not set)"}`);
   if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
     console.error("ERROR: Razorpay credentials missing in environment! Payments will fail.");

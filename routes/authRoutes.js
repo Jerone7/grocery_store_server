@@ -3,7 +3,7 @@ const bcrypt = require("bcryptjs");
 const db = require("../db/db");
 const router = require("express").Router();
 
-const SECRET_KEY = "super_secret_key_change_this"; // In prod use env var
+const SECRET_KEY = process.env.JWT_SECRET || "change_this_in_production";
 
 router.post("/signup", async (req, res) => {
     const { name, email, password } = req.body;
@@ -46,8 +46,12 @@ router.put("/phone", async (req, res) => {
     if (!email || !phone) return res.status(400).json({ error: "Email and phone are required" });
 
     try {
-        const [result] = await db.query("UPDATE users SET phone = ? WHERE email = ?", [phone, email]);
-        if (result.affectedRows === 0) return res.status(404).json({ error: "User not found" });
+        // Upsert: create user row if Firebase user doesn't exist in MySQL yet
+        await db.query(
+            "INSERT INTO users (name, email, password) VALUES (?, ?, '') ON DUPLICATE KEY UPDATE email=email",
+            [email.split('@')[0], email]
+        );
+        await db.query("UPDATE users SET phone = ? WHERE email = ?", [phone, email]);
         res.json({ success: true, phone });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -61,7 +65,8 @@ router.get("/phone", async (req, res) => {
 
     try {
         const [users] = await db.query("SELECT phone, address FROM users WHERE email = ?", [email]);
-        if (users.length === 0) return res.status(404).json({ error: "User not found" });
+        // Return nulls if Firebase user not yet in MySQL (no error)
+        if (users.length === 0) return res.json({ phone: null, address: null });
         res.json({ phone: users[0].phone || null, address: users[0].address || null });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -74,8 +79,12 @@ router.put("/address", async (req, res) => {
     if (!email || !address) return res.status(400).json({ error: "Email and address are required" });
 
     try {
-        const [result] = await db.query("UPDATE users SET address = ? WHERE email = ?", [address, email]);
-        if (result.affectedRows === 0) return res.status(404).json({ error: "User not found" });
+        // Upsert: create user row if Firebase user doesn't exist in MySQL yet
+        await db.query(
+            "INSERT INTO users (name, email, password) VALUES (?, ?, '') ON DUPLICATE KEY UPDATE email=email",
+            [email.split('@')[0], email]
+        );
+        await db.query("UPDATE users SET address = ? WHERE email = ?", [address, email]);
         res.json({ success: true, address });
     } catch (err) {
         res.status(500).json({ error: err.message });

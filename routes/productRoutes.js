@@ -25,6 +25,16 @@ router.get("/category/:id", async (req, res) => {
   }
 });
 
+router.get("/featured", async (req, res) => {
+  try {
+    const [rows] = await db.query("SELECT * FROM products WHERE is_featured = 1 AND is_enabled = 1 LIMIT 8");
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "DB error" });
+  }
+});
+
 router.get("/search", async (req, res) => {
   try {
     const q = req.query.q || "";
