@@ -1,0 +1,6 @@
+[dotenv@17.2.3] injecting env (14) from .env -- tip: ⚙️  enable debug logging with { debug: true }
+Backend running on port 5000
+Store frontend: http://localhost:5000/
+Admin frontend: http://localhost:5000/admin
+Admin API: http://localhost:5000/admin-api
+RAZORPAY_KEY_ID=rzp_test_SNnGT71o0NNae0

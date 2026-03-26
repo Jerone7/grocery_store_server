@@ -14,14 +14,13 @@ if (!supabaseUrl || !supabaseKey) {
 }
 
 const getSupabase = () => {
-  if (!supabase) {
-    throw new Error("Supabase is not configured. Set SUPABASE_URL and SUPABASE_KEY to enable uploads.");
-  }
-
-  return supabase;
+  return supabase; // returns null if not configured
 };
+
+const isSupabaseConfigured = () => !!supabase;
 
 module.exports = {
   supabase,
   getSupabase,
+  isSupabaseConfigured,
 };

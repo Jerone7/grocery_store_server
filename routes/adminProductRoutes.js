@@ -2,7 +2,7 @@ const express = require("express");
 const multer = require("multer");
 
 const db = require("../db/db");
-const { getSupabase } = require("../config/supabase");
+const { getSupabase, isSupabaseConfigured } = require("../config/supabase");
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -60,9 +60,18 @@ const ensureIsFeaturedColumn = () =>
     { get value() { return hasCheckedIsFeaturedColumn; }, set value(v) { hasCheckedIsFeaturedColumn = v; } }
   );
 
+const ensureColumns = async () => {
+    try {
+        await Promise.all([ensureIsEnabledColumn(), ensureIsFeaturedColumn()]);
+    } catch (err) {
+        console.error("Failed to ensure database columns:", err.message);
+        // Do not block the request if this fails, as columns might already exist
+    }
+};
+
 router.get("/", async (req, res) => {
   try {
-    await Promise.all([ensureIsEnabledColumn(), ensureIsFeaturedColumn()]);
+    await ensureColumns();
 
     const includeDisabled =
       String(req.query.include_disabled || "").toLowerCase() === "true";
@@ -113,24 +122,30 @@ router.post("/", upload.single("image"), async (req, res) => {
   let imageUrl = null;
 
   try {
-    await Promise.all([ensureIsEnabledColumn(), ensureIsFeaturedColumn()]);
+    await ensureColumns();
+    console.log(`[ADMIN] Adding product: ${name}`);
 
     if (file) {
-      const supabase = getSupabase();
-      const fileName = `items/${Date.now()}_${file.originalname}`;
-      const { error } = await supabase.storage.from("products").upload(fileName, file.buffer, {
-        contentType: file.mimetype,
-      });
+      if (!isSupabaseConfigured()) {
+        console.warn("[ADMIN] Image provided but Supabase is not configured. Product will be saved without image.");
+      } else {
+        const supabase = getSupabase();
+        const fileName = `items/${Date.now()}_${file.originalname}`;
+        const { error } = await supabase.storage.from("product-images").upload(fileName, file.buffer, {
+          contentType: file.mimetype,
+        });
 
-      if (error) {
-        throw error;
+        if (error) {
+          console.error("[ADMIN] Supabase upload error:", error.message);
+          throw error;
+        }
+
+        const { data: publicUrlData } = supabase.storage
+          .from("product-images")
+          .getPublicUrl(fileName);
+
+        imageUrl = publicUrlData.publicUrl;
       }
-
-      const { data: publicUrlData } = supabase.storage
-        .from("products")
-        .getPublicUrl(fileName);
-
-      imageUrl = publicUrlData.publicUrl;
     }
 
     const [result] = await db.query(
@@ -155,7 +170,7 @@ router.post("/", upload.single("image"), async (req, res) => {
         price,
         category_id,
         stock_quantity,
-        weight_quantity,
+        weight_quantity || null,
         weight_unit,
         imageUrl,
         isEnabled,
@@ -172,12 +187,12 @@ router.post("/", upload.single("image"), async (req, res) => {
       message: "Product created successfully",
     });
   } catch (error) {
-    console.error(error);
+    console.error("[ADMIN] Product add error:", error.message);
     return res.status(500).json({ error: error.message });
   }
 });
 
-router.put("/:id", async (req, res) => {
+router.put("/:id", upload.single("image"), async (req, res) => {
   const { id } = req.params;
   const {
     name,
@@ -192,7 +207,35 @@ router.put("/:id", async (req, res) => {
   } = req.body;
 
   try {
-    await Promise.all([ensureIsEnabledColumn(), ensureIsFeaturedColumn()]);
+    await ensureColumns();
+    console.log(`[ADMIN] Updating product ${id}:`, req.body);
+
+    const file = req.file;
+    let imageUrl = req.body.image_url;
+
+    if (file) {
+      console.log(`[ADMIN] Uploading new image for product ${id}`);
+      if (!isSupabaseConfigured()) {
+        console.warn("[ADMIN] Image provided but Supabase is not configured. Keeping existing image.");
+      } else {
+        const supabase = getSupabase();
+        const fileName = `items/${Date.now()}_${file.originalname}`;
+        const { error } = await supabase.storage.from("product-images").upload(fileName, file.buffer, {
+          contentType: file.mimetype,
+        });
+
+        if (error) {
+          console.error("[ADMIN] Supabase upload error:", error.message);
+          throw error;
+        }
+
+        const { data: publicUrlData } = supabase.storage
+          .from("product-images")
+          .getPublicUrl(fileName);
+
+        imageUrl = publicUrlData.publicUrl;
+      }
+    }
 
     const updateFields = [];
     const updateValues = [];
@@ -202,10 +245,11 @@ router.put("/:id", async (req, res) => {
     if (price !== undefined) { updateFields.push("price = ?"); updateValues.push(price); }
     if (category_id !== undefined) { updateFields.push("category_id = ?"); updateValues.push(category_id); }
     if (stock_quantity !== undefined) { updateFields.push("stock = ?"); updateValues.push(stock_quantity); }
-    if (weight_quantity !== undefined) { updateFields.push("weight_quantity = ?"); updateValues.push(weight_quantity); }
+    if (weight_quantity !== undefined) { updateFields.push("weight_quantity = ?"); updateValues.push(weight_quantity || null); }
     if (weight_unit !== undefined) { updateFields.push("weight_unit = ?"); updateValues.push(weight_unit); }
     if (is_featured !== undefined) { updateFields.push("is_featured = ?"); updateValues.push(Number(is_featured) === 1 ? 1 : 0); }
     if (is_enabled !== undefined) { updateFields.push("is_enabled = ?"); updateValues.push(Number(is_enabled) === 1 ? 1 : 0); }
+    if (imageUrl !== undefined) { updateFields.push("image_url = ?"); updateValues.push(imageUrl); }
 
     if (updateFields.length === 0) {
       return res.status(400).json({ message: "No fields to update" });
@@ -216,8 +260,9 @@ router.put("/:id", async (req, res) => {
       [...updateValues, id]
     );
 
-    return res.json({ message: "Product updated successfully" });
+    return res.json({ message: "Product updated successfully", imageUrl });
   } catch (error) {
+    console.error("[ADMIN] Product update error:", error.message);
     return res.status(500).json({ error: error.message });
   }
 });

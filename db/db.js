@@ -8,7 +8,8 @@ const db = mysql.createPool({
   database: process.env.MYSQLDATABASE || "grocery_store",
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  timezone: "+00:00"
 });
 
 module.exports = db;

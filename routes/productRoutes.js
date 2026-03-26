@@ -4,7 +4,23 @@ const db = require("../db/db");
 
 router.get("/", async (req, res) => {
   try {
-    const [rows] = await db.query("SELECT * FROM products");
+    const limit = req.query.limit ? parseInt(req.query.limit) : null;
+    const excludeDescription = req.query.excludeDescription === "true";
+
+    let selectFields = "*";
+    if (excludeDescription) {
+      selectFields = "product_id, product_name, price, category_id, image_url, stock, weight_quantity AS weight, weight_unit AS unit, is_featured, is_enabled";
+    }
+
+    let query = `SELECT ${selectFields} FROM products WHERE is_enabled = 1`;
+    const params = [];
+
+    if (limit) {
+      query += " LIMIT ?";
+      params.push(limit);
+    }
+
+    const [rows] = await db.query(query, params);
     res.json(rows);
   } catch (err) {
     console.error(err);

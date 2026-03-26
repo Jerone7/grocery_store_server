@@ -1,6 +1,10 @@
 const express = require("express");
 
 const db = require("../db/db");
+const {
+  normalizeStatus,
+  sendOrderStatusNotification,
+} = require("../config/orderNotifications");
 
 const router = express.Router();
 
@@ -65,8 +69,33 @@ router.patch("/:id/status", async (req, res) => {
   }
 
   try {
-    await db.query("UPDATE orders SET status = ? WHERE id = ?", [status, id]);
-    return res.json({ message: "Order status updated successfully", id, status });
+    const normalizedStatus = normalizeStatus(status);
+    const [orders] = await db.query(
+      `SELECT id, user_email, status
+       FROM orders
+       WHERE id = ?
+       LIMIT 1`,
+      [id]
+    );
+
+    if (orders.length === 0) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const existingOrder = orders[0];
+    const previousStatus = normalizeStatus(existingOrder.status);
+
+    await db.query("UPDATE orders SET status = ? WHERE id = ?", [normalizedStatus, id]);
+
+    if (previousStatus !== normalizedStatus) {
+      await sendOrderStatusNotification(req, {
+        orderId: existingOrder.id,
+        userEmail: existingOrder.user_email,
+        status: normalizedStatus,
+      });
+    }
+
+    return res.json({ message: "Order status updated successfully", id, status: normalizedStatus });
   } catch (error) {
     console.error("Error updating order status:", error);
     return res.status(500).json({ error: error.message });

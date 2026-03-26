@@ -1,4 +1,7 @@
 require("dotenv").config();
+console.log("FILE CONTENT START");
+console.log(require("fs").readFileSync(__filename, "utf8").split("\n").slice(0, 30).join("\n"));
+console.log("FILE CONTENT END");
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
