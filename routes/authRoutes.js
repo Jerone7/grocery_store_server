@@ -10,24 +10,59 @@ const router = require("express").Router();
 const SECRET_KEY = process.env.JWT_SECRET || "change_this_in_production";
 
 let ensureNotificationColumnsPromise = null;
+let ensureProfileColumnsPromise = null;
+
+const getUsersTableColumns = async () => {
+    const [rows] = await db.query(
+        `SELECT COLUMN_NAME
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`
+    );
+    return new Set(rows.map((row) => row.COLUMN_NAME));
+};
+
+const ensureProfileColumns = async () => {
+    if (!ensureProfileColumnsPromise) {
+        ensureProfileColumnsPromise = (async () => {
+            const columns = await getUsersTableColumns();
+            const statements = [
+                ["phone", "ALTER TABLE users ADD COLUMN phone VARCHAR(15) DEFAULT NULL"],
+                ["address", "ALTER TABLE users ADD COLUMN address TEXT DEFAULT NULL"],
+            ];
+
+            for (const [columnName, statement] of statements) {
+                if (columns.has(columnName)) {
+                    continue;
+                }
+
+                await db.query(statement);
+            }
+        })().catch((error) => {
+            ensureProfileColumnsPromise = null;
+            throw error;
+        });
+    }
+
+    return ensureProfileColumnsPromise;
+};
 
 const ensureNotificationColumns = async () => {
     if (!ensureNotificationColumnsPromise) {
         ensureNotificationColumnsPromise = (async () => {
+            await ensureProfileColumns();
+            const columns = await getUsersTableColumns();
             const statements = [
-                "ALTER TABLE users ADD COLUMN fcm_token TEXT DEFAULT NULL",
-                "ALTER TABLE users ADD COLUMN notifications_enabled TINYINT(1) NOT NULL DEFAULT 0",
-                "ALTER TABLE users ADD COLUMN notification_token_updated_at TIMESTAMP NULL DEFAULT NULL",
+                ["fcm_token", "ALTER TABLE users ADD COLUMN fcm_token TEXT DEFAULT NULL"],
+                ["notifications_enabled", "ALTER TABLE users ADD COLUMN notifications_enabled TINYINT(1) NOT NULL DEFAULT 0"],
+                ["notification_token_updated_at", "ALTER TABLE users ADD COLUMN notification_token_updated_at TIMESTAMP NULL DEFAULT NULL"],
             ];
 
-            for (const statement of statements) {
-                try {
-                    await db.query(statement);
-                } catch (error) {
-                    if (!/Duplicate column name/i.test(error.message)) {
-                        throw error;
-                    }
+            for (const [columnName, statement] of statements) {
+                if (columns.has(columnName)) {
+                    continue;
                 }
+
+                await db.query(statement);
             }
         })().catch((error) => {
             ensureNotificationColumnsPromise = null;
@@ -89,6 +124,7 @@ router.put("/phone", async (req, res) => {
     if (!email || !phone) return res.status(400).json({ error: "Email and phone are required" });
 
     try {
+        await ensureProfileColumns();
         // Upsert: create user row if Firebase user doesn't exist in MySQL yet
         await ensureUserRow(email);
         await db.query("UPDATE users SET phone = ? WHERE email = ?", [phone, email]);
@@ -104,6 +140,7 @@ router.get("/phone", async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
+        await ensureProfileColumns();
         const [users] = await db.query("SELECT phone, address FROM users WHERE email = ?", [email]);
         // Return nulls if Firebase user not yet in MySQL (no error)
         if (users.length === 0) return res.json({ phone: null, address: null });
@@ -119,6 +156,7 @@ router.put("/address", async (req, res) => {
     if (!email || !address) return res.status(400).json({ error: "Email and address are required" });
 
     try {
+        await ensureProfileColumns();
         // Upsert: create user row if Firebase user doesn't exist in MySQL yet
         await ensureUserRow(email);
         await db.query("UPDATE users SET address = ? WHERE email = ?", [address, email]);

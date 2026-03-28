@@ -1,10 +1,10 @@
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
-const path = require("path");
 const adminAuthMiddleware = require("./middleware/adminAuthMiddleware");
 
 const app = express();

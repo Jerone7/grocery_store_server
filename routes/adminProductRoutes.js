@@ -9,6 +9,16 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 let hasCheckedIsEnabledColumn = false;
 let hasCheckedIsFeaturedColumn = false;
+let hasCheckedStoragePathColumn = false;
+
+const PRODUCT_BUCKET_CANDIDATES = ["product-images", "products"];
+const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+const ALLOWED_MIME_TYPES = new Set([
+  "image/webp",
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+]);
 
 const normalizeDbBooleanValue = (value) => {
   if (Buffer.isBuffer(value)) {
@@ -60,9 +70,66 @@ const ensureIsFeaturedColumn = () =>
     { get value() { return hasCheckedIsFeaturedColumn; }, set value(v) { hasCheckedIsFeaturedColumn = v; } }
   );
 
+const ensureStoragePathColumn = () =>
+  ensureColumn(
+    "storage_path",
+    "ALTER TABLE products ADD COLUMN storage_path VARCHAR(255) NULL AFTER image_url",
+    { get value() { return hasCheckedStoragePathColumn; }, set value(v) { hasCheckedStoragePathColumn = v; } }
+  );
+
+const validateFile = (file) => {
+  if (!file) {
+    return null;
+  }
+
+  if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+    return "Only webp, jpg, jpeg, and png files are allowed.";
+  }
+
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return "Image size must be 5 MB or less.";
+  }
+
+  return null;
+};
+
+const uploadProductImage = async (file) => {
+  const supabase = getSupabase();
+  const safeFileName = String(file.originalname || "product-image")
+    .replace(/[^a-zA-Z0-9._-]/g, "_");
+  const fileName = `items/${Date.now()}_${safeFileName}`;
+  const uploadErrors = [];
+
+  for (const bucketName of PRODUCT_BUCKET_CANDIDATES) {
+    const { error } = await supabase.storage.from(bucketName).upload(fileName, file.buffer, {
+      contentType: file.mimetype,
+    });
+
+    if (error) {
+      uploadErrors.push(`${bucketName}: ${error.message}`);
+      continue;
+    }
+
+    const { data: publicUrlData } = supabase.storage
+      .from(bucketName)
+      .getPublicUrl(fileName);
+
+    return {
+      imageUrl: publicUrlData.publicUrl,
+      storagePath: fileName,
+    };
+  }
+
+  throw new Error(uploadErrors.join(" | ") || "Image upload failed");
+};
+
 const ensureColumns = async () => {
     try {
-        await Promise.all([ensureIsEnabledColumn(), ensureIsFeaturedColumn()]);
+        await Promise.all([
+          ensureIsEnabledColumn(),
+          ensureIsFeaturedColumn(),
+          ensureStoragePathColumn(),
+        ]);
     } catch (err) {
         console.error("Failed to ensure database columns:", err.message);
         // Do not block the request if this fails, as columns might already exist
@@ -87,6 +154,7 @@ router.get("/", async (req, res) => {
         weight_quantity,
         weight_unit,
         image_url,
+        storage_path,
         is_enabled,
         is_featured
       FROM products
@@ -120,31 +188,24 @@ router.post("/", upload.single("image"), async (req, res) => {
   const isFeatured = Number(req.body.is_featured) === 1 ? 1 : 0;
   const file = req.file;
   let imageUrl = null;
+  let storagePath = null;
 
   try {
     await ensureColumns();
     console.log(`[ADMIN] Adding product: ${name}`);
 
+    const validationError = validateFile(file);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
+    }
+
     if (file) {
       if (!isSupabaseConfigured()) {
         console.warn("[ADMIN] Image provided but Supabase is not configured. Product will be saved without image.");
       } else {
-        const supabase = getSupabase();
-        const fileName = `items/${Date.now()}_${file.originalname}`;
-        const { error } = await supabase.storage.from("product-images").upload(fileName, file.buffer, {
-          contentType: file.mimetype,
-        });
-
-        if (error) {
-          console.error("[ADMIN] Supabase upload error:", error.message);
-          throw error;
-        }
-
-        const { data: publicUrlData } = supabase.storage
-          .from("product-images")
-          .getPublicUrl(fileName);
-
-        imageUrl = publicUrlData.publicUrl;
+        const uploadResult = await uploadProductImage(file);
+        imageUrl = uploadResult.imageUrl;
+        storagePath = uploadResult.storagePath;
       }
     }
 
@@ -159,10 +220,11 @@ router.post("/", upload.single("image"), async (req, res) => {
           weight_quantity,
           weight_unit,
           image_url,
+          storage_path,
           is_enabled,
           is_featured
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         name,
@@ -173,6 +235,7 @@ router.post("/", upload.single("image"), async (req, res) => {
         weight_quantity || null,
         weight_unit,
         imageUrl,
+        storagePath,
         isEnabled,
         isFeatured,
       ]
@@ -212,28 +275,21 @@ router.put("/:id", upload.single("image"), async (req, res) => {
 
     const file = req.file;
     let imageUrl = req.body.image_url;
+    let storagePath = req.body.storage_path;
+
+    const validationError = validateFile(file);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
+    }
 
     if (file) {
       console.log(`[ADMIN] Uploading new image for product ${id}`);
       if (!isSupabaseConfigured()) {
         console.warn("[ADMIN] Image provided but Supabase is not configured. Keeping existing image.");
       } else {
-        const supabase = getSupabase();
-        const fileName = `items/${Date.now()}_${file.originalname}`;
-        const { error } = await supabase.storage.from("product-images").upload(fileName, file.buffer, {
-          contentType: file.mimetype,
-        });
-
-        if (error) {
-          console.error("[ADMIN] Supabase upload error:", error.message);
-          throw error;
-        }
-
-        const { data: publicUrlData } = supabase.storage
-          .from("product-images")
-          .getPublicUrl(fileName);
-
-        imageUrl = publicUrlData.publicUrl;
+        const uploadResult = await uploadProductImage(file);
+        imageUrl = uploadResult.imageUrl;
+        storagePath = uploadResult.storagePath;
       }
     }
 
@@ -250,6 +306,7 @@ router.put("/:id", upload.single("image"), async (req, res) => {
     if (is_featured !== undefined) { updateFields.push("is_featured = ?"); updateValues.push(Number(is_featured) === 1 ? 1 : 0); }
     if (is_enabled !== undefined) { updateFields.push("is_enabled = ?"); updateValues.push(Number(is_enabled) === 1 ? 1 : 0); }
     if (imageUrl !== undefined) { updateFields.push("image_url = ?"); updateValues.push(imageUrl); }
+    if (storagePath !== undefined) { updateFields.push("storage_path = ?"); updateValues.push(storagePath || null); }
 
     if (updateFields.length === 0) {
       return res.status(400).json({ message: "No fields to update" });

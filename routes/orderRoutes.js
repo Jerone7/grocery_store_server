@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require("../db/db");
 const { sendOrderPlacedNotification } = require("../config/orderNotifications");
 const CANCEL_WINDOW_MS = 5 * 60 * 1000;
+let hasCheckedOrderTables = false;
 
 async function getTableColumns(connOrPool, tableName) {
     const [rows] = await connOrPool.query(
@@ -59,6 +60,85 @@ function decorateOrder(order, orderIdColumn, orderDateColumn) {
     order.can_cancel = order.status === "pending" && remainingMs > 0;
 }
 
+async function ensureOrdersTables(connOrPool = db) {
+    if (hasCheckedOrderTables) {
+        return;
+    }
+
+    await connOrPool.query(`
+        CREATE TABLE IF NOT EXISTS orders (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_email VARCHAR(255) NOT NULL,
+            payment_method VARCHAR(50) NOT NULL DEFAULT 'upi',
+            payment_details VARCHAR(255) DEFAULT NULL,
+            delivery_address TEXT,
+            item_total DECIMAL(10, 2) NOT NULL DEFAULT 0,
+            delivery_charge DECIMAL(10, 2) NOT NULL DEFAULT 25,
+            handling_charge DECIMAL(10, 2) NOT NULL DEFAULT 2,
+            grand_total DECIMAL(10, 2) NOT NULL DEFAULT 0,
+            status VARCHAR(50) NOT NULL DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await connOrPool.query(`
+        CREATE TABLE IF NOT EXISTS order_items (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            order_id INT NOT NULL,
+            product_id INT NOT NULL,
+            product_name VARCHAR(255) NOT NULL,
+            image_url TEXT,
+            price DECIMAL(10, 2) NOT NULL,
+            amount DECIMAL(10, 2) DEFAULT NULL,
+            quantity INT NOT NULL DEFAULT 1,
+            order_date TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
+        )
+    `);
+
+    const orderColumns = await getTableColumns(connOrPool, "orders");
+    const orderColumnFixes = [
+        ["payment_method", "ALTER TABLE orders ADD COLUMN payment_method VARCHAR(50) NOT NULL DEFAULT 'upi' AFTER user_email"],
+        ["payment_details", "ALTER TABLE orders ADD COLUMN payment_details VARCHAR(255) DEFAULT NULL AFTER payment_method"],
+        ["delivery_address", "ALTER TABLE orders ADD COLUMN delivery_address TEXT AFTER payment_details"],
+        ["item_total", "ALTER TABLE orders ADD COLUMN item_total DECIMAL(10, 2) NOT NULL DEFAULT 0 AFTER delivery_address"],
+        ["delivery_charge", "ALTER TABLE orders ADD COLUMN delivery_charge DECIMAL(10, 2) NOT NULL DEFAULT 25 AFTER item_total"],
+        ["handling_charge", "ALTER TABLE orders ADD COLUMN handling_charge DECIMAL(10, 2) NOT NULL DEFAULT 2 AFTER delivery_charge"],
+        ["grand_total", "ALTER TABLE orders ADD COLUMN grand_total DECIMAL(10, 2) NOT NULL DEFAULT 0 AFTER handling_charge"],
+        ["status", "ALTER TABLE orders ADD COLUMN status VARCHAR(50) NOT NULL DEFAULT 'pending' AFTER grand_total"],
+        ["created_at", "ALTER TABLE orders ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER status"],
+    ];
+
+    for (const [columnName, alterSql] of orderColumnFixes) {
+        if (!orderColumns.has(columnName)) {
+            await connOrPool.query(alterSql);
+        }
+    }
+
+    const itemColumns = await getTableColumns(connOrPool, "order_items");
+    const itemColumnFixes = [
+        ["order_id", "ALTER TABLE order_items ADD COLUMN order_id INT NOT NULL AFTER id"],
+        ["product_id", "ALTER TABLE order_items ADD COLUMN product_id INT NOT NULL AFTER order_id"],
+        ["product_name", "ALTER TABLE order_items ADD COLUMN product_name VARCHAR(255) NOT NULL DEFAULT '' AFTER product_id"],
+        ["image_url", "ALTER TABLE order_items ADD COLUMN image_url TEXT AFTER product_name"],
+        ["price", "ALTER TABLE order_items ADD COLUMN price DECIMAL(10, 2) NOT NULL DEFAULT 0 AFTER image_url"],
+        ["amount", "ALTER TABLE order_items ADD COLUMN amount DECIMAL(10, 2) DEFAULT NULL AFTER price"],
+        ["quantity", "ALTER TABLE order_items ADD COLUMN quantity INT NOT NULL DEFAULT 1 AFTER amount"],
+        ["order_date", "ALTER TABLE order_items ADD COLUMN order_date TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP AFTER quantity"],
+    ];
+
+    for (const [columnName, alterSql] of itemColumnFixes) {
+        if (!itemColumns.has(columnName)) {
+            await connOrPool.query(alterSql);
+        }
+    }
+
+    await connOrPool.query("ALTER TABLE orders MODIFY COLUMN status VARCHAR(50) NOT NULL DEFAULT 'pending'");
+    await connOrPool.query("ALTER TABLE order_items MODIFY COLUMN quantity INT NOT NULL DEFAULT 1");
+
+    hasCheckedOrderTables = true;
+}
+
 // POST /api/orders - place a new order
 router.post("/", async (req, res) => {
     const {
@@ -77,9 +157,12 @@ router.post("/", async (req, res) => {
     }
 
     const conn = await db.getConnection();
+    let transactionOpen = false;
 
     try {
+        await ensureOrdersTables(conn);
         await conn.beginTransaction();
+        transactionOpen = true;
 
         const orderColumns = await getTableColumns(conn, "orders");
         if (!orderColumns.has("user_email")) {
@@ -173,14 +256,27 @@ router.post("/", async (req, res) => {
         }
 
         await conn.commit();
-        await sendOrderPlacedNotification(req, {
+        transactionOpen = false;
+
+        res.status(201).json({ success: true, order_id: orderId });
+
+        void sendOrderPlacedNotification(req, {
             orderId,
             userEmail: user_email,
-            grandTotal,
+            grandTotal: grand_total,
+        }).catch((notificationError) => {
+            console.error("Order notification failed:", notificationError);
         });
-        return res.status(201).json({ success: true, order_id: orderId });
+
+        return;
     } catch (err) {
-        await conn.rollback();
+        if (transactionOpen) {
+            try {
+                await conn.rollback();
+            } catch (rollbackError) {
+                console.error("Order rollback failed:", rollbackError);
+            }
+        }
         console.error("Order error:", err);
         const statusCode = /required|not found|stock/i.test(err.message) ? 400 : 500;
         return res.status(statusCode).json({
@@ -197,6 +293,7 @@ router.get("/", async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
+        await ensureOrdersTables();
         const orderColumns = await getTableColumns(db, "orders");
         const itemColumns = await getTableColumns(db, "order_items");
 
@@ -272,6 +369,7 @@ router.patch("/:id/cancel", async (req, res) => {
     }
 
     try {
+        await ensureOrdersTables();
         const orderColumns = await getTableColumns(db, "orders");
         const orderIdColumn = resolveOrderIdColumn(orderColumns);
         const orderDateColumn = resolveOrderDateColumn(orderColumns);
@@ -326,6 +424,7 @@ router.patch("/:id/cancel", async (req, res) => {
 // GET /api/orders/all - admin: fetch ALL orders with items and payment info
 router.get("/all", async (req, res) => {
     try {
+        await ensureOrdersTables();
         const orderColumns = await getTableColumns(db, "orders");
         const itemColumns = await getTableColumns(db, "order_items");
 
