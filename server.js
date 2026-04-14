@@ -1,5 +1,6 @@
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
+require("./db/mongoose");
 const express = require("express");
 const cors = require("cors");
 const http = require("http");

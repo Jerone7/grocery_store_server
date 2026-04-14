@@ -1,9 +1,14 @@
 const router = require("express").Router();
-const db = require("../db/db");
+const Category = require("../models/Category");
 
 router.get("/", async (req, res) => {
-  const [rows] = await db.query("SELECT * FROM categories");
-  res.json(rows);
+  try {
+    const rows = await Category.find().lean();
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "DB error" });
+  }
 });
 
 module.exports = router;

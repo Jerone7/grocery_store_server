@@ -1,13 +1,13 @@
 const express = require("express");
 
-const db = require("../db/db");
+const Category = require("../models/Category");
 
 const router = express.Router();
 
 router.get("/", async (_req, res) => {
   try {
-    const [categories] = await db.query("SELECT category_id as id, category_name as name FROM categories");
-    return res.json(categories);
+    const categories = await Category.find({}, { _id: 0, category_id: 1, category_name: 1 }).lean();
+    return res.json(categories.map((c) => ({ id: c.category_id, name: c.category_name })));
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
@@ -17,8 +17,8 @@ router.post("/", async (req, res) => {
   const { name } = req.body;
 
   try {
-    const [result] = await db.query("INSERT INTO categories (category_name) VALUES (?)", [name]);
-    return res.status(201).json({ id: result.insertId, name });
+    const category = await Category.create({ category_name: name });
+    return res.status(201).json({ id: category.category_id, name });
   } catch (error) {
     return res.status(500).json({ error: error.message });
   }
@@ -29,7 +29,10 @@ router.put("/:id", async (req, res) => {
   const { name } = req.body;
 
   try {
-    await db.query("UPDATE categories SET category_name = ? WHERE category_id = ?", [name, id]);
+    await Category.updateOne(
+      { category_id: Number(id) },
+      { $set: { category_name: name } }
+    );
     return res.json({ message: "Category updated successfully" });
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -40,7 +43,7 @@ router.delete("/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
-    await db.query("DELETE FROM categories WHERE category_id = ?", [id]);
+    await Category.deleteOne({ category_id: Number(id) });
     return res.json({ message: "Category deleted successfully" });
   } catch (error) {
     return res.status(500).json({ error: error.message });

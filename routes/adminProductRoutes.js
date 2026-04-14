@@ -1,15 +1,11 @@
 const express = require("express");
 const multer = require("multer");
 
-const db = require("../db/db");
+const Product = require("../models/Product");
 const { getSupabase, isSupabaseConfigured } = require("../config/supabase");
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
-
-let hasCheckedIsEnabledColumn = false;
-let hasCheckedIsFeaturedColumn = false;
-let hasCheckedStoragePathColumn = false;
 
 const PRODUCT_BUCKET_CANDIDATES = ["product-images", "products"];
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
@@ -19,63 +15,6 @@ const ALLOWED_MIME_TYPES = new Set([
   "image/jpg",
   "image/png",
 ]);
-
-const normalizeDbBooleanValue = (value) => {
-  if (Buffer.isBuffer(value)) {
-    return value[0] === 1 ? 1 : 0;
-  }
-
-  if (value && typeof value === "object" && Array.isArray(value.data)) {
-    return value.data[0] === 1 ? 1 : 0;
-  }
-
-  return Number(value) === 1 ? 1 : 0;
-};
-
-const ensureColumn = async (columnName, addSql, cacheFlag) => {
-  if (cacheFlag.value) {
-    return;
-  }
-
-  const [columns] = await db.query(
-    `
-      SELECT 1
-      FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = 'products'
-        AND COLUMN_NAME = ?
-      LIMIT 1
-    `,
-    [columnName]
-  );
-
-  if (columns.length === 0) {
-    await db.query(addSql);
-  }
-
-  cacheFlag.value = true;
-};
-
-const ensureIsEnabledColumn = () =>
-  ensureColumn(
-    "is_enabled",
-    "ALTER TABLE products ADD COLUMN is_enabled TINYINT(1) NOT NULL DEFAULT 1",
-    { get value() { return hasCheckedIsEnabledColumn; }, set value(v) { hasCheckedIsEnabledColumn = v; } }
-  );
-
-const ensureIsFeaturedColumn = () =>
-  ensureColumn(
-    "is_featured",
-    "ALTER TABLE products ADD COLUMN is_featured TINYINT(1) NOT NULL DEFAULT 0",
-    { get value() { return hasCheckedIsFeaturedColumn; }, set value(v) { hasCheckedIsFeaturedColumn = v; } }
-  );
-
-const ensureStoragePathColumn = () =>
-  ensureColumn(
-    "storage_path",
-    "ALTER TABLE products ADD COLUMN storage_path VARCHAR(255) NULL AFTER image_url",
-    { get value() { return hasCheckedStoragePathColumn; }, set value(v) { hasCheckedStoragePathColumn = v; } }
-  );
 
 const validateFile = (file) => {
   if (!file) {
@@ -123,50 +62,43 @@ const uploadProductImage = async (file) => {
   throw new Error(uploadErrors.join(" | ") || "Image upload failed");
 };
 
-const ensureColumns = async () => {
-    try {
-        await Promise.all([
-          ensureIsEnabledColumn(),
-          ensureIsFeaturedColumn(),
-          ensureStoragePathColumn(),
-        ]);
-    } catch (err) {
-        console.error("Failed to ensure database columns:", err.message);
-        // Do not block the request if this fails, as columns might already exist
-    }
-};
-
 router.get("/", async (req, res) => {
   try {
-    await ensureColumns();
-
     const includeDisabled =
       String(req.query.include_disabled || "").toLowerCase() === "true";
 
-    const baseQuery = `
-      SELECT
-        product_id AS id,
-        product_name AS name,
-        description,
-        price,
-        category_id,
-        stock AS stock_quantity,
-        weight_quantity,
-        weight_unit,
-        image_url,
-        storage_path,
-        is_enabled,
-        is_featured
-      FROM products
-    `;
-    const query = includeDisabled ? baseQuery : `${baseQuery} WHERE is_enabled = 1`;
-    const [products] = await db.query(query);
+    const filter = includeDisabled ? {} : { is_enabled: 1 };
+
+    const products = await Product.find(filter, {
+      _id: 0,
+      product_id: 1,
+      product_name: 1,
+      description: 1,
+      price: 1,
+      category_id: 1,
+      stock: 1,
+      weight_quantity: 1,
+      weight_unit: 1,
+      image_url: 1,
+      storage_path: 1,
+      is_enabled: 1,
+      is_featured: 1,
+    }).lean();
 
     return res.json(
       products.map((product) => ({
-        ...product,
-        is_enabled: normalizeDbBooleanValue(product.is_enabled),
-        is_featured: normalizeDbBooleanValue(product.is_featured),
+        id: product.product_id,
+        name: product.product_name,
+        description: product.description,
+        price: product.price,
+        category_id: product.category_id,
+        stock_quantity: product.stock,
+        weight_quantity: product.weight_quantity,
+        weight_unit: product.weight_unit,
+        image_url: product.image_url,
+        storage_path: product.storage_path,
+        is_enabled: product.is_enabled,
+        is_featured: product.is_featured,
       }))
     );
   } catch (error) {
@@ -191,7 +123,6 @@ router.post("/", upload.single("image"), async (req, res) => {
   let storagePath = null;
 
   try {
-    await ensureColumns();
     console.log(`[ADMIN] Adding product: ${name}`);
 
     const validationError = validateFile(file);
@@ -209,40 +140,22 @@ router.post("/", upload.single("image"), async (req, res) => {
       }
     }
 
-    const [result] = await db.query(
-      `
-        INSERT INTO products (
-          product_name,
-          description,
-          price,
-          category_id,
-          stock,
-          weight_quantity,
-          weight_unit,
-          image_url,
-          storage_path,
-          is_enabled,
-          is_featured
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-      [
-        name,
-        description,
-        price,
-        category_id,
-        stock_quantity,
-        weight_quantity || null,
-        weight_unit,
-        imageUrl,
-        storagePath,
-        isEnabled,
-        isFeatured,
-      ]
-    );
+    const product = await Product.create({
+      product_name: name,
+      description,
+      price,
+      category_id,
+      stock: stock_quantity,
+      weight_quantity: weight_quantity || null,
+      weight_unit,
+      image_url: imageUrl,
+      storage_path: storagePath,
+      is_enabled: isEnabled,
+      is_featured: isFeatured,
+    });
 
     return res.status(201).json({
-      id: result.insertId,
+      id: product.product_id,
       name,
       imageUrl,
       is_enabled: isEnabled,
@@ -270,7 +183,6 @@ router.put("/:id", upload.single("image"), async (req, res) => {
   } = req.body;
 
   try {
-    await ensureColumns();
     console.log(`[ADMIN] Updating product ${id}:`, req.body);
 
     const file = req.file;
@@ -293,28 +205,26 @@ router.put("/:id", upload.single("image"), async (req, res) => {
       }
     }
 
-    const updateFields = [];
-    const updateValues = [];
+    const updateFields = {};
+    if (name !== undefined) updateFields.product_name = name;
+    if (description !== undefined) updateFields.description = description;
+    if (price !== undefined) updateFields.price = price;
+    if (category_id !== undefined) updateFields.category_id = category_id;
+    if (stock_quantity !== undefined) updateFields.stock = stock_quantity;
+    if (weight_quantity !== undefined) updateFields.weight_quantity = weight_quantity || null;
+    if (weight_unit !== undefined) updateFields.weight_unit = weight_unit;
+    if (is_featured !== undefined) updateFields.is_featured = Number(is_featured) === 1 ? 1 : 0;
+    if (is_enabled !== undefined) updateFields.is_enabled = Number(is_enabled) === 1 ? 1 : 0;
+    if (imageUrl !== undefined) updateFields.image_url = imageUrl;
+    if (storagePath !== undefined) updateFields.storage_path = storagePath || null;
 
-    if (name !== undefined) { updateFields.push("product_name = ?"); updateValues.push(name); }
-    if (description !== undefined) { updateFields.push("description = ?"); updateValues.push(description); }
-    if (price !== undefined) { updateFields.push("price = ?"); updateValues.push(price); }
-    if (category_id !== undefined) { updateFields.push("category_id = ?"); updateValues.push(category_id); }
-    if (stock_quantity !== undefined) { updateFields.push("stock = ?"); updateValues.push(stock_quantity); }
-    if (weight_quantity !== undefined) { updateFields.push("weight_quantity = ?"); updateValues.push(weight_quantity || null); }
-    if (weight_unit !== undefined) { updateFields.push("weight_unit = ?"); updateValues.push(weight_unit); }
-    if (is_featured !== undefined) { updateFields.push("is_featured = ?"); updateValues.push(Number(is_featured) === 1 ? 1 : 0); }
-    if (is_enabled !== undefined) { updateFields.push("is_enabled = ?"); updateValues.push(Number(is_enabled) === 1 ? 1 : 0); }
-    if (imageUrl !== undefined) { updateFields.push("image_url = ?"); updateValues.push(imageUrl); }
-    if (storagePath !== undefined) { updateFields.push("storage_path = ?"); updateValues.push(storagePath || null); }
-
-    if (updateFields.length === 0) {
+    if (Object.keys(updateFields).length === 0) {
       return res.status(400).json({ message: "No fields to update" });
     }
 
-    await db.query(
-      `UPDATE products SET ${updateFields.join(", ")} WHERE product_id = ?`,
-      [...updateValues, id]
+    await Product.updateOne(
+      { product_id: Number(id) },
+      { $set: updateFields }
     );
 
     return res.json({ message: "Product updated successfully", imageUrl });
@@ -335,13 +245,12 @@ router.patch("/:id/status", async (req, res) => {
   const normalizedStatus = Number(is_enabled) === 1 ? 1 : 0;
 
   try {
-    await ensureIsEnabledColumn();
-    const [result] = await db.query(
-      "UPDATE products SET is_enabled = ? WHERE product_id = ?",
-      [normalizedStatus, id]
+    const result = await Product.updateOne(
+      { product_id: Number(id) },
+      { $set: { is_enabled: normalizedStatus } }
     );
 
-    if (result.affectedRows === 0) {
+    if (result.matchedCount === 0) {
       return res.status(404).json({ error: "Product not found" });
     }
 
@@ -359,7 +268,7 @@ router.delete("/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
-    await db.query("DELETE FROM products WHERE product_id = ?", [id]);
+    await Product.deleteOne({ product_id: Number(id) });
     return res.json({ message: "Product deleted successfully" });
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -368,10 +277,12 @@ router.delete("/:id", async (req, res) => {
 
 router.put("/toggle/:id", async (req, res) => {
   try {
-    await ensureIsEnabledColumn();
-    await db.query("UPDATE products SET is_enabled = NOT is_enabled WHERE product_id = ?", [
-      req.params.id,
-    ]);
+    const product = await Product.findOne({ product_id: Number(req.params.id) });
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+    product.is_enabled = product.is_enabled === 1 ? 0 : 1;
+    await product.save();
     return res.json({ message: "Product status updated" });
   } catch (error) {
     return res.status(500).json(error);

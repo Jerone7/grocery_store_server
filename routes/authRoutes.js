@@ -1,6 +1,6 @@
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const db = require("../db/db");
+const User = require("../models/User");
 const {
     isFirebaseAdminConfigured,
     sendPushToToken,
@@ -8,77 +8,6 @@ const {
 const router = require("express").Router();
 
 const SECRET_KEY = process.env.JWT_SECRET || "change_this_in_production";
-
-let ensureNotificationColumnsPromise = null;
-let ensureProfileColumnsPromise = null;
-
-const getUsersTableColumns = async () => {
-    const [rows] = await db.query(
-        `SELECT COLUMN_NAME
-         FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'`
-    );
-    return new Set(rows.map((row) => row.COLUMN_NAME));
-};
-
-const ensureProfileColumns = async () => {
-    if (!ensureProfileColumnsPromise) {
-        ensureProfileColumnsPromise = (async () => {
-            const columns = await getUsersTableColumns();
-            const statements = [
-                ["phone", "ALTER TABLE users ADD COLUMN phone VARCHAR(15) DEFAULT NULL"],
-                ["address", "ALTER TABLE users ADD COLUMN address TEXT DEFAULT NULL"],
-            ];
-
-            for (const [columnName, statement] of statements) {
-                if (columns.has(columnName)) {
-                    continue;
-                }
-
-                await db.query(statement);
-            }
-        })().catch((error) => {
-            ensureProfileColumnsPromise = null;
-            throw error;
-        });
-    }
-
-    return ensureProfileColumnsPromise;
-};
-
-const ensureNotificationColumns = async () => {
-    if (!ensureNotificationColumnsPromise) {
-        ensureNotificationColumnsPromise = (async () => {
-            await ensureProfileColumns();
-            const columns = await getUsersTableColumns();
-            const statements = [
-                ["fcm_token", "ALTER TABLE users ADD COLUMN fcm_token TEXT DEFAULT NULL"],
-                ["notifications_enabled", "ALTER TABLE users ADD COLUMN notifications_enabled TINYINT(1) NOT NULL DEFAULT 0"],
-                ["notification_token_updated_at", "ALTER TABLE users ADD COLUMN notification_token_updated_at TIMESTAMP NULL DEFAULT NULL"],
-            ];
-
-            for (const [columnName, statement] of statements) {
-                if (columns.has(columnName)) {
-                    continue;
-                }
-
-                await db.query(statement);
-            }
-        })().catch((error) => {
-            ensureNotificationColumnsPromise = null;
-            throw error;
-        });
-    }
-
-    return ensureNotificationColumnsPromise;
-};
-
-const ensureUserRow = async (email) => {
-    await db.query(
-        "INSERT INTO users (name, email, password) VALUES (?, ?, '') ON DUPLICATE KEY UPDATE email=email",
-        [email.split("@")[0], email]
-    );
-};
 
 const getStoreAppUrl = (req) =>
     process.env.STORE_APP_URL || req.get("origin") || `${req.protocol}://${req.get("host")}`;
@@ -88,11 +17,11 @@ router.post("/signup", async (req, res) => {
     if (!email || !password) return res.status(400).json({ error: "Missing fields" });
 
     try {
-        const [existing] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-        if (existing.length > 0) return res.status(400).json({ error: "Email already exists" });
+        const existing = await User.findOne({ email });
+        if (existing) return res.status(400).json({ error: "Email already exists" });
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        await db.query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", [name || "User", email, hashedPassword]);
+        await User.create({ name: name || "User", email, password: hashedPassword });
 
         res.json({ message: "User created" });
     } catch (err) {
@@ -104,10 +33,9 @@ router.post("/login", async (req, res) => {
     const { email, password } = req.body;
 
     try {
-        const [users] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-        if (users.length === 0) return res.status(400).json({ error: "User not found" });
+        const user = await User.findOne({ email });
+        if (!user) return res.status(400).json({ error: "User not found" });
 
-        const user = users[0];
         const match = await bcrypt.compare(password, user.password);
         if (!match) return res.status(400).json({ error: "Invalid password" });
 
@@ -124,10 +52,11 @@ router.put("/phone", async (req, res) => {
     if (!email || !phone) return res.status(400).json({ error: "Email and phone are required" });
 
     try {
-        await ensureProfileColumns();
-        // Upsert: create user row if Firebase user doesn't exist in MySQL yet
-        await ensureUserRow(email);
-        await db.query("UPDATE users SET phone = ? WHERE email = ?", [phone, email]);
+        await User.findOneAndUpdate(
+            { email },
+            { $setOnInsert: { name: email.split("@")[0], password: "" }, $set: { phone } },
+            { upsert: true }
+        );
         res.json({ success: true, phone });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -140,11 +69,9 @@ router.get("/phone", async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
-        await ensureProfileColumns();
-        const [users] = await db.query("SELECT phone, address FROM users WHERE email = ?", [email]);
-        // Return nulls if Firebase user not yet in MySQL (no error)
-        if (users.length === 0) return res.json({ phone: null, address: null });
-        res.json({ phone: users[0].phone || null, address: users[0].address || null });
+        const user = await User.findOne({ email }, { phone: 1, address: 1 });
+        if (!user) return res.json({ phone: null, address: null });
+        res.json({ phone: user.phone || null, address: user.address || null });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -156,10 +83,11 @@ router.put("/address", async (req, res) => {
     if (!email || !address) return res.status(400).json({ error: "Email and address are required" });
 
     try {
-        await ensureProfileColumns();
-        // Upsert: create user row if Firebase user doesn't exist in MySQL yet
-        await ensureUserRow(email);
-        await db.query("UPDATE users SET address = ? WHERE email = ?", [address, email]);
+        await User.findOneAndUpdate(
+            { email },
+            { $setOnInsert: { name: email.split("@")[0], password: "" }, $set: { address } },
+            { upsert: true }
+        );
         res.json({ success: true, address });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -171,14 +99,13 @@ router.get("/notifications/status", async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
-        await ensureNotificationColumns();
+        const user = await User.findOne({ email }, {
+            notifications_enabled: 1,
+            fcm_token: 1,
+            notification_token_updated_at: 1,
+        });
 
-        const [users] = await db.query(
-            "SELECT notifications_enabled, fcm_token, notification_token_updated_at FROM users WHERE email = ?",
-            [email]
-        );
-
-        if (users.length === 0) {
+        if (!user) {
             return res.json({
                 enabled: false,
                 hasToken: false,
@@ -187,7 +114,6 @@ router.get("/notifications/status", async (req, res) => {
             });
         }
 
-        const user = users[0];
         res.json({
             enabled: Boolean(user.notifications_enabled),
             hasToken: Boolean(user.fcm_token),
@@ -206,19 +132,23 @@ router.put("/notifications/token", async (req, res) => {
     }
 
     try {
-        await ensureNotificationColumns();
-        await ensureUserRow(email);
-        await db.query(
-            `UPDATE users
-             SET fcm_token = NULL, notifications_enabled = 0, notification_token_updated_at = NULL
-             WHERE fcm_token = ? AND email <> ?`,
-            [token, email]
+        // Clear this token from any other user
+        await User.updateMany(
+            { fcm_token: token, email: { $ne: email } },
+            { $set: { fcm_token: null, notifications_enabled: 0, notification_token_updated_at: null } }
         );
-        await db.query(
-            `UPDATE users
-             SET fcm_token = ?, notifications_enabled = 1, notification_token_updated_at = CURRENT_TIMESTAMP
-             WHERE email = ?`,
-            [token, email]
+
+        // Ensure user row exists
+        await User.findOneAndUpdate(
+            { email },
+            { $setOnInsert: { name: email.split("@")[0], password: "" } },
+            { upsert: true }
+        );
+
+        // Set the token
+        await User.updateOne(
+            { email },
+            { $set: { fcm_token: token, notifications_enabled: 1, notification_token_updated_at: new Date() } }
         );
 
         res.json({
@@ -237,13 +167,9 @@ router.delete("/notifications/token", async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
-        await ensureNotificationColumns();
-        await ensureUserRow(email);
-        await db.query(
-            `UPDATE users
-             SET fcm_token = NULL, notifications_enabled = 0, notification_token_updated_at = NULL
-             WHERE email = ?`,
-            [email]
+        await User.updateOne(
+            { email },
+            { $set: { fcm_token: null, notifications_enabled: 0, notification_token_updated_at: null } }
         );
 
         res.json({
@@ -262,21 +188,16 @@ router.post("/notifications/test", async (req, res) => {
     if (!email) return res.status(400).json({ error: "Email is required" });
 
     try {
-        await ensureNotificationColumns();
+        const user = await User.findOne({ email }, { fcm_token: 1, notifications_enabled: 1 });
 
-        const [users] = await db.query(
-            "SELECT fcm_token, notifications_enabled FROM users WHERE email = ?",
-            [email]
-        );
-
-        if (users.length === 0 || !users[0].fcm_token || !users[0].notifications_enabled) {
+        if (!user || !user.fcm_token || !user.notifications_enabled) {
             return res.status(400).json({ error: "Enable notifications for this browser first." });
         }
 
         const profileUrl = new URL("/profile", getStoreAppUrl(req)).toString();
 
         const messageId = await sendPushToToken({
-            token: users[0].fcm_token,
+            token: user.fcm_token,
             notification: {
                 title: "NM Store notifications enabled",
                 body: "You will now receive order, delivery, and account updates here.",

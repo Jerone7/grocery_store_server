@@ -2,7 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-const db = require("../db/db");
+const AdminUser = require("../models/AdminUser");
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || "change_this_in_production";
@@ -17,15 +17,14 @@ router.post("/login", async (req, res) => {
   }
 
   try {
-    const [rows] = await db.query("SELECT * FROM admin_users WHERE email = ?", [email]);
+    const admin = await AdminUser.findOne({ email });
 
-    if (rows.length === 0) {
+    if (!admin) {
       return res
         .status(401)
         .json({ success: false, message: "Invalid credentials." });
     }
 
-    const admin = rows[0];
     let passwordMatch = false;
 
     try {

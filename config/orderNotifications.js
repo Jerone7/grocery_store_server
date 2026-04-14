@@ -1,4 +1,4 @@
-const db = require("../db/db");
+const User = require("../models/User");
 const { sendPushToToken } = require("./firebaseAdmin");
 
 const getStoreAppUrl = (req) =>
@@ -19,11 +19,9 @@ const clearInvalidToken = async (token) => {
   }
 
   try {
-    await db.query(
-      `UPDATE users
-       SET fcm_token = NULL, notifications_enabled = 0, notification_token_updated_at = NULL
-       WHERE fcm_token = ?`,
-      [token]
+    await User.updateMany(
+      { fcm_token: token },
+      { $set: { fcm_token: null, notifications_enabled: 0, notification_token_updated_at: null } }
     );
   } catch (error) {
     console.error("Failed to clear invalid push token:", error.message);
@@ -35,19 +33,15 @@ const getUserPushToken = async (email) => {
     return null;
   }
 
-  const [users] = await db.query(
-    `SELECT fcm_token, notifications_enabled
-     FROM users
-     WHERE email = ?
-     LIMIT 1`,
-    [email]
+  const user = await User.findOne(
+    { email },
+    { fcm_token: 1, notifications_enabled: 1 }
   );
 
-  if (users.length === 0) {
+  if (!user) {
     return null;
   }
 
-  const user = users[0];
   if (!user.notifications_enabled || !user.fcm_token) {
     return null;
   }

@@ -1,7 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 
-const db = require("../db/db");
+const Banner = require("../models/Banner");
 const { getSupabase } = require("../config/supabase");
 
 const router = express.Router();
@@ -44,8 +44,6 @@ const BANNER_FOLDER_BY_TYPE = {
   footer_banner: "footer-banner",
 };
 
-let hasCheckedBannersTable = false;
-
 const normalizeBannerType = (value) => {
   const rawType = String(value || "").toLowerCase().trim();
 
@@ -81,18 +79,6 @@ const normalizeResourceType = (value) => {
   const resourceType = String(value || "custom").toLowerCase().trim();
   const allowed = new Set(["custom", "shop", "product", "category"]);
   return allowed.has(resourceType) ? resourceType : "custom";
-};
-
-const normalizeDbEnabledValue = (value) => {
-  if (Buffer.isBuffer(value)) {
-    return value[0] === 1 ? 1 : 0;
-  }
-
-  if (value && typeof value === "object" && Array.isArray(value.data)) {
-    return value.data[0] === 1 ? 1 : 0;
-  }
-
-  return Number(value) === 1 ? 1 : 0;
 };
 
 const parseEnabledValue = (value, fallback = 1) => {
@@ -148,106 +134,28 @@ const mapBannerRow = (row) => {
     resource_type: normalizeResourceType(row.resource_type),
     resource_value: row.resource_value || "",
     storage_path: row.storage_path || null,
-    is_enabled: normalizeDbEnabledValue(row.is_enabled),
+    is_enabled: row.is_enabled,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
 };
 
-const fetchBannerById = async (id) => {
-  const [rows] = await db.query(
-    `
-      SELECT id, image, type, resource_type, resource_value, storage_path, is_enabled, created_at, updated_at
-      FROM banners
-      WHERE id = ?
-      LIMIT 1
-    `,
-    [id]
-  );
-
-  return rows[0] || null;
-};
-
-const ensureBannersTable = async () => {
-  if (hasCheckedBannersTable) {
-    return;
-  }
-
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS banners (
-      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-      image TEXT NULL,
-      type VARCHAR(50) NULL,
-      resource_type VARCHAR(50) NULL,
-      resource_value VARCHAR(255) NULL,
-      storage_path VARCHAR(255) NULL,
-      is_enabled TINYINT(1) NOT NULL DEFAULT 1,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )
-  `);
-
-  const columnChecks = [
-    ["image", "ALTER TABLE banners ADD COLUMN image TEXT NULL", "ALTER TABLE banners MODIFY COLUMN image TEXT NULL"],
-    ["type", "ALTER TABLE banners ADD COLUMN type VARCHAR(50) NULL", "ALTER TABLE banners MODIFY COLUMN type VARCHAR(50) NULL"],
-    ["resource_type", "ALTER TABLE banners ADD COLUMN resource_type VARCHAR(50) NULL DEFAULT 'custom' AFTER type"],
-    ["resource_value", "ALTER TABLE banners ADD COLUMN resource_value VARCHAR(255) NULL AFTER resource_type"],
-    ["storage_path", "ALTER TABLE banners ADD COLUMN storage_path VARCHAR(255) NULL AFTER resource_value"],
-    ["is_enabled", "ALTER TABLE banners ADD COLUMN is_enabled TINYINT(1) NOT NULL DEFAULT 1 AFTER storage_path"],
-    ["created_at", "ALTER TABLE banners ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER is_enabled"],
-    ["updated_at", "ALTER TABLE banners ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at"],
-  ];
-
-  for (const [columnName, addSql, modifySql] of columnChecks) {
-    const [column] = await db.query(
-      `
-        SELECT 1
-        FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = 'banners'
-          AND COLUMN_NAME = ?
-        LIMIT 1
-      `,
-      [columnName]
-    );
-
-    if (column.length === 0) {
-      await db.query(addSql);
-    } else if (modifySql) {
-      await db.query(modifySql);
-    }
-  }
-
-  hasCheckedBannersTable = true;
-};
-
 router.get("/", async (req, res) => {
   try {
-    await ensureBannersTable();
-
-    const filters = [];
-    const values = [];
+    const filter = {};
     const requestedType = req.query.type ? normalizeBannerType(req.query.type) : null;
 
     if (requestedType && requestedType !== "all") {
-      filters.push("type = ?");
-      values.push(requestedType);
+      filter.type = requestedType;
     }
 
     if (String(req.query.enabled || "").toLowerCase() === "true") {
-      filters.push("is_enabled = 1");
+      filter.is_enabled = 1;
     }
 
-    const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-    const [rows] = await db.query(
-      `
-        SELECT id, image, type, resource_type, resource_value, storage_path, is_enabled, created_at, updated_at
-        FROM banners
-        ${whereClause}
-        ORDER BY updated_at DESC, id DESC
-      `,
-      values
-    );
+    const rows = await Banner.find(filter)
+      .sort({ updated_at: -1, id: -1 })
+      .lean();
 
     return res.json({ banners: rows.map(mapBannerRow) });
   } catch (error) {
@@ -258,15 +166,9 @@ router.get("/", async (req, res) => {
 
 router.get("/enabled", async (_req, res) => {
   try {
-    await ensureBannersTable();
-    const [rows] = await db.query(
-      `
-        SELECT id, image, type, resource_type, resource_value, storage_path, is_enabled, created_at, updated_at
-        FROM banners
-        WHERE is_enabled = 1
-        ORDER BY updated_at DESC, id DESC
-      `
-    );
+    const rows = await Banner.find({ is_enabled: 1 })
+      .sort({ updated_at: -1, id: -1 })
+      .lean();
 
     return res.json({ banners: rows.map(mapBannerRow) });
   } catch (error) {
@@ -277,8 +179,6 @@ router.get("/enabled", async (_req, res) => {
 
 router.post("/", upload.array("images", 10), async (req, res) => {
   try {
-    await ensureBannersTable();
-
     const bannerType = normalizeBannerType(req.body.type);
     const resourceType = normalizeResourceType(req.body.resource_type);
     const resourceValue = String(req.body.resource_value || "").trim();
@@ -301,7 +201,7 @@ router.post("/", upload.array("images", 10), async (req, res) => {
       }
     }
 
-    const createdIds = [];
+    const createdBanners = [];
 
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
@@ -324,31 +224,21 @@ router.post("/", upload.array("images", 10), async (req, res) => {
         .from(BANNER_BUCKET)
         .getPublicUrl(storagePath);
 
-      const [insertResult] = await db.query(
-        `
-          INSERT INTO banners (image, type, resource_type, resource_value, storage_path, is_enabled)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `,
-        [publicUrlData.publicUrl, bannerType, resourceType, resourceValue, storagePath, isEnabled]
-      );
+      const banner = await Banner.create({
+        image: publicUrlData.publicUrl,
+        type: bannerType,
+        resource_type: resourceType,
+        resource_value: resourceValue,
+        storage_path: storagePath,
+        is_enabled: isEnabled,
+      });
 
-      createdIds.push(insertResult.insertId);
+      createdBanners.push(banner);
     }
 
-    const placeholders = createdIds.map(() => "?").join(", ");
-    const [createdRows] = await db.query(
-      `
-        SELECT id, image, type, resource_type, resource_value, storage_path, is_enabled, created_at, updated_at
-        FROM banners
-        WHERE id IN (${placeholders})
-        ORDER BY id DESC
-      `,
-      createdIds
-    );
-
     return res.status(201).json({
-      message: `${createdRows.length} banner(s) added successfully.`,
-      banners: createdRows.map(mapBannerRow),
+      message: `${createdBanners.length} banner(s) added successfully.`,
+      banners: createdBanners.map((b) => mapBannerRow(b.toObject())),
     });
   } catch (error) {
     console.error("Error creating banners:", error);
@@ -358,14 +248,12 @@ router.post("/", upload.array("images", 10), async (req, res) => {
 
 router.put("/:id", upload.single("image"), async (req, res) => {
   try {
-    await ensureBannersTable();
-
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "Invalid banner id." });
     }
 
-    const existingBanner = await fetchBannerById(id);
+    const existingBanner = await Banner.findOne({ id }).lean();
     if (!existingBanner) {
       return res.status(404).json({ error: "Banner not found." });
     }
@@ -386,8 +274,8 @@ router.put("/:id", upload.single("image"), async (req, res) => {
         : String(existingBanner.resource_value || "");
     const isEnabled =
       req.body.is_enabled !== undefined
-        ? parseEnabledValue(req.body.is_enabled, normalizeDbEnabledValue(existingBanner.is_enabled))
-        : normalizeDbEnabledValue(existingBanner.is_enabled);
+        ? parseEnabledValue(req.body.is_enabled, existingBanner.is_enabled)
+        : existingBanner.is_enabled;
     const supabase = req.file ? getSupabase() : null;
 
     let imageUrl = existingBanner.image;
@@ -431,16 +319,22 @@ router.put("/:id", upload.single("image"), async (req, res) => {
       }
     }
 
-    await db.query(
-      `
-        UPDATE banners
-        SET image = ?, type = ?, resource_type = ?, resource_value = ?, storage_path = ?, is_enabled = ?
-        WHERE id = ?
-      `,
-      [imageUrl, requestedType, resourceType, resourceValue, storagePath, isEnabled, id]
+    await Banner.updateOne(
+      { id },
+      {
+        $set: {
+          image: imageUrl,
+          type: requestedType,
+          resource_type: resourceType,
+          resource_value: resourceValue,
+          storage_path: storagePath,
+          is_enabled: isEnabled,
+          updated_at: new Date(),
+        },
+      }
     );
 
-    const updatedBanner = await fetchBannerById(id);
+    const updatedBanner = await Banner.findOne({ id }).lean();
     return res.json({
       message: "Banner updated successfully.",
       banner: mapBannerRow(updatedBanner),
@@ -453,20 +347,17 @@ router.put("/:id", upload.single("image"), async (req, res) => {
 
 router.patch("/:id/status", async (req, res) => {
   try {
-    await ensureBannersTable();
-
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "Invalid banner id." });
     }
 
-    const existingBanner = await fetchBannerById(id);
+    const existingBanner = await Banner.findOne({ id }).lean();
     if (!existingBanner) {
       return res.status(404).json({ error: "Banner not found." });
     }
-    const supabase = getSupabase();
 
-    const currentStatus = normalizeDbEnabledValue(existingBanner.is_enabled);
+    const currentStatus = existingBanner.is_enabled;
     const isEnabled =
       req.body.is_enabled === undefined
         ? currentStatus === 1
@@ -474,8 +365,8 @@ router.patch("/:id/status", async (req, res) => {
           : 1
         : parseEnabledValue(req.body.is_enabled, currentStatus);
 
-    await db.query("UPDATE banners SET is_enabled = ? WHERE id = ?", [isEnabled, id]);
-    const updatedBanner = await fetchBannerById(id);
+    await Banner.updateOne({ id }, { $set: { is_enabled: isEnabled, updated_at: new Date() } });
+    const updatedBanner = await Banner.findOne({ id }).lean();
 
     return res.json({
       message: `Banner ${isEnabled === 1 ? "enabled" : "disabled"} successfully.`,
@@ -489,28 +380,31 @@ router.patch("/:id/status", async (req, res) => {
 
 router.delete("/:id", async (req, res) => {
   try {
-    await ensureBannersTable();
-
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) {
       return res.status(400).json({ error: "Invalid banner id." });
     }
 
-    const existingBanner = await fetchBannerById(id);
+    const existingBanner = await Banner.findOne({ id }).lean();
     if (!existingBanner) {
       return res.status(404).json({ error: "Banner not found." });
     }
 
-    await db.query("DELETE FROM banners WHERE id = ?", [id]);
+    await Banner.deleteOne({ id });
 
     const storagePath =
       existingBanner.storage_path || extractStoragePathFromUrl(existingBanner.image);
     if (storagePath) {
-      const { error: removeError } = await supabase.storage
-        .from(BANNER_BUCKET)
-        .remove([storagePath]);
-      if (removeError) {
-        console.error("Failed to remove banner image from storage:", removeError);
+      try {
+        const supabase = getSupabase();
+        const { error: removeError } = await supabase.storage
+          .from(BANNER_BUCKET)
+          .remove([storagePath]);
+        if (removeError) {
+          console.error("Failed to remove banner image from storage:", removeError);
+        }
+      } catch (storageErr) {
+        console.error("Failed to remove banner image from storage:", storageErr);
       }
     }
 

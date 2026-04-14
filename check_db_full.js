@@ -1,33 +1,32 @@
-require('dotenv').config();
-const mysql = require('mysql2/promise');
+require("dotenv").config();
+const mongoose = require("mongoose");
+
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/grocery_store";
 
 async function check() {
-  console.log("Connecting to:", process.env.MYSQLHOST);
-  const db = await mysql.createConnection({
-    host: process.env.MYSQLHOST,
-    port: process.env.MYSQLPORT,
-    user: process.env.MYSQLUSER,
-    password: process.env.MYSQLPASSWORD,
-    database: process.env.MYSQLDATABASE,
-  });
+  console.log("Connecting to MongoDB...");
+  await mongoose.connect(MONGODB_URI);
+  console.log("✅  Connected");
 
   try {
-    const [tables] = await db.query("SHOW TABLES");
-    console.log("Tables in database:", tables.map(t => Object.values(t)[0]));
+    const collections = await mongoose.connection.db.listCollections().toArray();
+    console.log("Collections:", collections.map((c) => c.name));
 
-    const [productsCount] = await db.query("SELECT COUNT(*) as count FROM products");
-    console.log("Products count:", productsCount[0].count);
+    const Product = require("./models/Product");
+    const Category = require("./models/Category");
 
-    const [enabledProductsCount] = await db.query("SELECT COUNT(*) as count FROM products WHERE is_enabled = 1");
-    console.log("Enabled products count:", enabledProductsCount[0].count);
+    const productsCount = await Product.countDocuments();
+    console.log("Products count:", productsCount);
 
-    const [categories] = await db.query("SELECT * FROM categories LIMIT 5");
+    const enabledProductsCount = await Product.countDocuments({ is_enabled: 1 });
+    console.log("Enabled products count:", enabledProductsCount);
+
+    const categories = await Category.find().limit(5).lean();
     console.log("Categories sample:", categories);
-
   } catch (err) {
     console.error("Error during check:", err.message);
   } finally {
-    await db.end();
+    await mongoose.disconnect();
   }
 }
 

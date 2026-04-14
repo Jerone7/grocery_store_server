@@ -1,6 +1,7 @@
 const express = require("express");
 
-const db = require("../db/db");
+const Order = require("../models/Order");
+const OrderItem = require("../models/OrderItem");
 const {
   normalizeStatus,
   sendOrderStatusNotification,
@@ -10,22 +11,25 @@ const router = express.Router();
 
 router.get("/", async (_req, res) => {
   try {
-    const [orders] = await db.query(`
-      SELECT
-        id,
-        user_email,
-        item_total,
-        delivery_charge,
-        handling_charge,
-        grand_total,
-        status,
-        created_at,
-        payment_method,
-        payment_details,
-        delivery_address
-      FROM orders
-      ORDER BY created_at DESC
-    `);
+    const orders = await Order.find(
+      {},
+      {
+        _id: 0,
+        id: 1,
+        user_email: 1,
+        item_total: 1,
+        delivery_charge: 1,
+        handling_charge: 1,
+        grand_total: 1,
+        status: 1,
+        created_at: 1,
+        payment_method: 1,
+        payment_details: 1,
+        delivery_address: 1,
+      }
+    )
+      .sort({ created_at: -1 })
+      .lean();
 
     return res.json(orders);
   } catch (error) {
@@ -38,20 +42,18 @@ router.get("/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
-    const [items] = await db.query(
-      `
-        SELECT
-          id,
-          product_name,
-          image_url,
-          price,
-          quantity,
-          amount
-        FROM order_items
-        WHERE order_id = ?
-      `,
-      [id]
-    );
+    const items = await OrderItem.find(
+      { order_id: Number(id) },
+      {
+        _id: 0,
+        id: 1,
+        product_name: 1,
+        image_url: 1,
+        price: 1,
+        quantity: 1,
+        amount: 1,
+      }
+    ).lean();
 
     return res.json(items);
   } catch (error) {
@@ -69,33 +71,30 @@ router.patch("/:id/status", async (req, res) => {
   }
 
   try {
-    const normalizedStatus = normalizeStatus(status);
-    const [orders] = await db.query(
-      `SELECT id, user_email, status
-       FROM orders
-       WHERE id = ?
-       LIMIT 1`,
-      [id]
-    );
+    const normalizedNewStatus = normalizeStatus(status);
 
-    if (orders.length === 0) {
+    const existingOrder = await Order.findOne({ id: Number(id) }).lean();
+
+    if (!existingOrder) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    const existingOrder = orders[0];
     const previousStatus = normalizeStatus(existingOrder.status);
 
-    await db.query("UPDATE orders SET status = ? WHERE id = ?", [normalizedStatus, id]);
+    await Order.updateOne(
+      { id: Number(id) },
+      { $set: { status: normalizedNewStatus } }
+    );
 
-    if (previousStatus !== normalizedStatus) {
+    if (previousStatus !== normalizedNewStatus) {
       await sendOrderStatusNotification(req, {
         orderId: existingOrder.id,
         userEmail: existingOrder.user_email,
-        status: normalizedStatus,
+        status: normalizedNewStatus,
       });
     }
 
-    return res.json({ message: "Order status updated successfully", id, status: normalizedStatus });
+    return res.json({ message: "Order status updated successfully", id, status: normalizedNewStatus });
   } catch (error) {
     console.error("Error updating order status:", error);
     return res.status(500).json({ error: error.message });

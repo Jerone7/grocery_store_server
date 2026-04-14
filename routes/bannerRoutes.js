@@ -1,9 +1,9 @@
 const router = require("express").Router();
-const db = require("../db/db");
+const Banner = require("../models/Banner");
 
 router.get("/", async (_req, res) => {
   try {
-    const [rows] = await db.query("SELECT * FROM banners ORDER BY id ASC");
+    const rows = await Banner.find().sort({ id: 1 }).lean();
     res.json(rows);
   } catch (error) {
     console.error("Error fetching banners:", error);
@@ -19,10 +19,7 @@ router.get("/:type", async (req, res) => {
   }
 
   try {
-    const [rows] = await db.query(
-      "SELECT * FROM banners WHERE type = ? ORDER BY id ASC",
-      [type]
-    );
+    const rows = await Banner.find({ type }).sort({ id: 1 }).lean();
     res.json(rows);
   } catch (error) {
     console.error(`Error fetching ${type} banners:`, error);
